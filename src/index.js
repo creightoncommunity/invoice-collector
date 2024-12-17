@@ -1,15 +1,9 @@
 import dotenv from 'dotenv';
 import inquirer from 'inquirer';
 import { AmazonService } from './amazon.js';
-import { setupLogger, RateLimiter } from './utils.js';
+import { setupLogger } from './utils.js';
 
 dotenv.config();
-
-const logger = setupLogger();
-const rateLimiter = new RateLimiter({
-  maxConcurrent: 1,
-  minTime: 1000
-});
 
 async function selectService() {
   const { service } = await inquirer.prompt([
@@ -24,6 +18,8 @@ async function selectService() {
 }
 
 async function main() {
+  const logger = await setupLogger();
+  
   try {
     const service = await selectService();
     
@@ -32,15 +28,17 @@ async function main() {
     }
 
     if (service === 'Amazon') {
-      const amazonService = new AmazonService(rateLimiter);
+      const amazonService = new AmazonService(logger);
       await amazonService.initialize();
       await amazonService.downloadInvoices();
     }
 
   } catch (error) {
-    logger.error('An error occurred:', error);
-    process.exit(1);
+    logger.error('An error occurred:', { error: error.stack });
   }
 }
 
-main();
+main().catch(error => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});

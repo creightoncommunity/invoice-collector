@@ -19,86 +19,10 @@ const navigationPaths = {
   }
 };
 
-class BatchPrinter {
-  constructor(logger) {
-    this.selectedInvoices = [];
-    this.batchFile = path.join(os.homedir(), 'receipts', 'batch_queue.json');
-    this.logger = logger;
-  }
-
-  async add(orders) {
-    try {
-      const newInvoices = orders.map(order => ({
-        orderId: order.orderId,
-        description: order.items[0],
-        date: order.orderDate,
-        total: order.total,
-        url: `https://www.amazon.com/gp/css/summary/print.html/ref=od_aui_print_invoice?ie=UTF8&orderID=${order.orderId}`,
-        selected: new Date().toISOString(),
-        status: 'pending'
-      }));
-
-      this.selectedInvoices.push(...newInvoices);
-      
-      await this.save();
-      console.log(`\nAdded ${orders.length} invoice(s) to batch queue. Total in queue: ${this.selectedInvoices.length}`);
-      console.log('Queue saved to:', this.batchFile);
-    } catch (error) {
-      this.logger.error('Failed to add orders to batch queue', { error: error.stack });
-      console.error('Failed to add orders to batch queue');
-    }
-  }
-
-  async save() {
-    try {
-      // Ensure directory exists
-      await fs.mkdir(path.dirname(this.batchFile), { recursive: true });
-      await fs.writeFile(this.batchFile, JSON.stringify({
-        lastUpdated: new Date().toISOString(),
-        invoices: this.selectedInvoices
-      }, null, 2));
-    } catch (error) {
-      this.logger.error('Failed to save batch queue', { error: error.stack });
-      throw error;
-    }
-  }
-
-  async load() {
-    try {
-      const data = await fs.readFile(this.batchFile, 'utf8');
-      const queue = JSON.parse(data);
-      this.selectedInvoices = queue.invoices || [];
-    } catch (error) {
-      this.selectedInvoices = [];
-      // Don't log error for first-time use
-      if (error.code !== 'ENOENT') {
-        this.logger.error('Failed to load batch queue', { error: error.stack });
-      }
-    }
-  }
-
-  getCount() {
-    return this.selectedInvoices.length;
-  }
-
-  getPending() {
-    return this.selectedInvoices.filter(invoice => invoice.status === 'pending');
-  }
-
-  async clear() {
-    this.selectedInvoices = [];
-    try {
-      await fs.unlink(this.batchFile).catch(() => {});
-    } catch (error) {
-      this.logger.error('Failed to clear batch queue', { error: error.stack });
-    }
-  }
-}
-
 export class AmazonService {
-  constructor(logger) {
+  constructor(rateLimiter) {
     this.storage = new Storage('amazon');
-    this.logger = logger;
+    this.rateLimiter = rateLimiter;
     this.browser = null;
     this.page = null;
     this.debug = process.env.DEBUG === 'true';
@@ -209,9 +133,6 @@ export class AmazonService {
 
   async downloadInvoices() {
     let currentPage = 0;
-    let batchMode = false;
-    const batchPrinter = new BatchPrinter(this.logger);
-    await batchPrinter.load();
     
     while (true) {
       try {
@@ -276,187 +197,21 @@ export class AmazonService {
         
         console.log(`Pages: ${paginationLine}`);
 
-        // Update the action menu based on mode and batch status
         const { action } = await inquirer.prompt([
           {
             type: 'list',
             name: 'action',
-            message: `Choose an action ${batchMode ? '[BATCH MODE]' : ''} (${batchPrinter.getCount()} invoices in queue):`,
+            message: 'Choose an action:',
             choices: [
-              ...(batchMode ? [
-                { name: 'Add current selection to batch', value: 'batch' },
-                { name: 'Exit batch mode', value: 'exitBatch' },
-              ] : [
-                { name: 'Select orders to download now', value: 'select' },
-                { name: 'Enter batch mode', value: 'enterBatch' },
-              ]),
-              new inquirer.Separator(),
+              { name: 'Select orders to download', value: 'select' },
               { name: 'Go to page...', value: 'goto' },
+              new inquirer.Separator(),
               { name: 'Next page', value: 'next', disabled: orders.length < 10 },
               { name: 'Previous page', value: 'prev', disabled: currentPage === 0 },
-              new inquirer.Separator(),
-              { 
-                name: `Process batch queue (${batchPrinter.getCount()} items)`, 
-                value: 'process',
-                disabled: batchPrinter.getCount() === 0 
-              },
-              { 
-                name: 'Clear batch queue', 
-                value: 'clear',
-                disabled: batchPrinter.getCount() === 0 
-              },
               { name: 'Exit application', value: 'exit' }
             ]
           }
         ]);
-
-        if (action === 'enterBatch') {
-          batchMode = true;
-          console.log('\nEntered batch mode. All selections will be added to queue.');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-
-        if (action === 'exitBatch') {
-          batchMode = false;
-          console.log('\nExited batch mode.');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-
-        if (action === 'select') {
-          const { selectedOrders } = await inquirer.prompt([
-            {
-              type: 'checkbox',
-              name: 'selectedOrders',
-              message: 'Select orders to download:',
-              choices: orders.map((order, index) => ({
-                name: `${(index + 1).toString().padStart(2, ' ')}. ${order.total.padEnd(10)} - ${order.items[0].substring(0, 60)}`,
-                value: order,
-                checked: false
-              }))
-            }
-          ]);
-
-          if (selectedOrders.length > 0) {
-            for (const order of selectedOrders) {
-              await this.downloadInvoice(order.orderId, order.orderDate);
-            }
-          }
-          continue;
-        }
-
-        if (action === 'batch' || (batchMode && action === 'select')) {
-          const { selectedOrders } = await inquirer.prompt([
-            {
-              type: 'checkbox',
-              name: 'selectedOrders',
-              message: 'Select orders to add to batch queue:',
-              choices: orders.map((order, index) => ({
-                name: `${(index + 1).toString().padStart(2, ' ')}. ${order.total.padEnd(10)} - ${order.items[0].substring(0, 60)}`,
-                value: order,
-                checked: false
-              }))
-            }
-          ]);
-
-          if (selectedOrders.length > 0) {
-            await batchPrinter.add(selectedOrders);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
-          continue;
-        }
-
-        if (action === 'process') {
-          console.log('\nProcessing batch queue...');
-          const pendingInvoices = batchPrinter.getPending();
-          
-          if (pendingInvoices.length === 0) {
-            console.log('No pending invoices found in queue.');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            continue;
-          }
-
-          console.log(`Found ${pendingInvoices.length} invoices to process.`);
-          console.log('\nStarting browser automation...');
-          
-          for (const [index, invoice] of pendingInvoices.entries()) {
-            try {
-              console.log(`\nProcessing invoice ${index + 1} of ${pendingInvoices.length}`);
-              console.log(`Order: ${invoice.description.substring(0, 60)}...`);
-              console.log(`ID: ${invoice.orderId}`);
-              
-              // Add a small delay between invoices
-              if (index > 0) {
-                console.log('Waiting briefly before next invoice...');
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-
-              await this.downloadInvoice(invoice.orderId, invoice.date);
-              
-              // Mark as processed
-              invoice.status = 'completed';
-              invoice.processedAt = new Date().toISOString();
-              await batchPrinter.save();
-              
-              console.log('✓ Invoice processed successfully');
-              
-            } catch (error) {
-              this.logger.error('Failed to process invoice:', { 
-                error: error.stack,
-                invoice: invoice.orderId,
-                description: invoice.description
-              });
-              console.error(`× Failed to process invoice: ${error.message}`);
-              
-              // Mark as failed
-              invoice.status = 'failed';
-              invoice.error = error.message;
-              await batchPrinter.save();
-              
-              // Ask if user wants to continue after an error
-              const { shouldContinue } = await inquirer.prompt([{
-                type: 'confirm',
-                name: 'shouldContinue',
-                message: 'Would you like to continue processing the remaining invoices?',
-                default: true
-              }]);
-              
-              if (!shouldContinue) {
-                console.log('\nBatch processing interrupted by user.');
-                break;
-              }
-            }
-          }
-
-          const results = {
-            completed: pendingInvoices.filter(i => i.status === 'completed').length,
-            failed: pendingInvoices.filter(i => i.status === 'failed').length,
-            remaining: pendingInvoices.filter(i => i.status === 'pending').length
-          };
-
-          console.log('\nBatch processing summary:');
-          console.log(`✓ Completed: ${results.completed}`);
-          console.log(`× Failed: ${results.failed}`);
-          console.log(`• Remaining: ${results.remaining}`);
-
-          if (results.failed === 0 && results.remaining === 0) {
-            await batchPrinter.clear();
-            console.log('\nAll invoices processed successfully. Queue cleared!');
-          } else {
-            console.log('\nSome invoices remain in queue for next run.');
-          }
-          
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          continue;
-        }
-
-        if (action === 'clear') {
-          await batchPrinter.clear();
-          console.log('\nBatch queue cleared!');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
 
         if (action === 'goto') {
           const { pageNumber } = await inquirer.prompt([
@@ -488,16 +243,14 @@ export class AmazonService {
             continue;
           
           case 'exit':
-            console.log('\nClosing browser...');
-            await this.browser.close();
-            console.log('Goodbye!');
+            console.log('\nGoodbye!');
             process.exit(0);
         }
 
         // Handle order selection and download...
 
       } catch (error) {
-        this.logger.error('Error processing orders:', {
+        logger.error('Error processing orders:', {
           error: error.message,
           stack: error.stack
         });
@@ -512,7 +265,7 @@ export class AmazonService {
     const startTime = Date.now();
     
     try {
-      this.logger.debug('🚀 Starting PDF capture', {
+      logger.debug('🚀 Starting PDF capture', {
         timestamp: new Date().toLocaleString(),
         orderId,
         attempt: retryCount + 1,
@@ -522,7 +275,7 @@ export class AmazonService {
       const invoiceUrl = new URL('https://www.amazon.com/gp/css/summary/print.html');
       invoiceUrl.searchParams.set('orderID', orderId);
       
-      this.logger.debug('📄 Navigation starting', {
+      logger.debug('📄 Navigation starting', {
         timestamp: new Date().toLocaleString(),
         url: invoiceUrl.toString()
       });
@@ -548,7 +301,7 @@ export class AmazonService {
       // Small delay to ensure page is ready
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      this.logger.debug('Initiating PDF capture');
+      logger.debug('Initiating PDF capture');
       const pdf = await this.page.pdf({
         scale: 0.5,
         format: 'A4',
@@ -556,7 +309,7 @@ export class AmazonService {
         timeout: 30000
       });
       
-      this.logger.debug('✅ PDF captured successfully', {
+      logger.debug('✅ PDF captured successfully', {
         timestamp: new Date().toLocaleString(),
         bytes: pdf.length,
         duration: `${Date.now() - startTime}ms`
@@ -565,7 +318,7 @@ export class AmazonService {
       return await this.storage.saveInvoice(orderId, pdf, orderDate);
 
     } catch (error) {
-      this.logger.error('❌ Invoice capture failed', {
+      logger.error('❌ Invoice capture failed', {
         timestamp: new Date().toLocaleString(),
         orderId,
         error: error.message,
