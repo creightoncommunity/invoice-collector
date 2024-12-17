@@ -1,16 +1,19 @@
 {
   "name": "invoice-collector",
-  "version": "0.0.0",
-  "private": true,
+  "version": "1.0.0",
+  "description": "E-commerce invoice collector with support for multiple platforms",
+  "main": "src/index.js",
+  "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "test": "vitest"
+    "start": "node src/index.js"
   },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.5.2",
-    "wrangler": "^3.60.3",
-    "vitest": "2.1.8"
+  "dependencies": {
+    "puppeteer-core": "^22.8.2",
+    "@puppeteer/browsers": "^2.0.0",
+    "dotenv": "^16.0.0",
+    "axios": "^1.6.0",
+    "bottleneck": "^2.19.5",
+    "inquirer": "^9.0.0",
+    "winston": "^3.10.0"
   }
 }
